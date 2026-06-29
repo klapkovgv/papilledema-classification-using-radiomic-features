@@ -90,6 +90,98 @@ Mixed-class patients — a single patient can have samples from both classes (e.
 
 The moderate class imbalance (69.6% Normal vs 30.4% Papilledema) was addressed by using Macro-F1 as the primary evaluation metric, which treats both classes equally regardless of their frequency.
 
+## Methodology
+
+The principle of this pipeline is strict prevention of data leakage, ensuring that information from test data never inadvertently influences the training process. Applying data transformation to the entire dataset before splitting is a common mistake and can lead to high bias and overly optimistic model performance.
+
+In medical datasets, a single patient often has multiple data points (X-ray scans, CT slices, clinical records). If we split by individual sample rather than by patient, different samples from the same patient end up in both training and test sets which means the model essentially memorizes diagnoses instead of learning real patterns. This leads to strong evaluation results but poor real-world performance.
+
+To address this, the train-test split process is repeated 20 times with different random seeds, providing a more robust and reliable evaluation framework.
+
+The outer split code is shown in the following list:
+```python
+outer_splits = []
+
+for seed in range(20):
+    p_trainval, p_test = train_test_split(patients, test_size=0.2, random_state=seed)
+    p_train, p_val = train_test_split(p_trainval, test_size=0.125, random_state=seed)
+    outer_splits.append({
+        'train_patients': p_train,
+        'val_patients':   p_val,
+        'test_patients':  p_test,
+        'seed':           seed
+    })
+```
+
+A nested cross-validation approach was used:
+* **Outer loop** — splits data into train/validation/test at the patient level (these are 20 splits)
+* **Inner loop** — performs model selection and hyperparameter optimization via Optuna on the training fold only
+
+This ensures hyperparameter selection is based solely on training data, with no information leaking from the test set. Benefits of this approach:
+* reduces overfitting by evaluating the model on different data subsets
+* provides stable and reliable performance estimates across unseen data
+
+Building a robust, clinical-grade ML framework requires careful architectural design to prevent data leakage, handle high-dimensional feature spaces, and ensure reliable probability estimates. To address these challenges, I implemented the following pipeline:
+
+```text
+1.  Data loading and binary label assignment (Normal=0, Papilledema=1)
+2.  20 repeated patient-level splits (70% train / 10% val / 20% test)
+3.  For each outer split, for each model:
+    ├── Inner CV with Optuna hyperparameter optimization
+    ├── Preprocessing fitted on inner-training fold only
+    ├── MRMR feature selection on inner-training fold only
+    └── Model training + inner-validation evaluation (Macro-F1)
+4.  Best configuration refitted on full training set
+5.  Sigmoid calibration on training set
+6.  Validation set used for:
+    ├── Threshold optimization (range 0.05–0.95, step 0.01)
+    └── Aggregation strategy selection (Macro-F1 + balanced accuracy)
+7.  Train + validation merged → final model refitted
+8.  Independent test set evaluation
+9.  Aggregation of results across 20 splits
+10. Soft-voting ensemble (RF + ET + GB)
+11. Feature stability analysis
+12. Statistical comparison (Friedman, Wilcoxon, Bonferroni)
+```
+
+The validation set serves two specific purposes:
+
+1. Threshold Optimization — class-specific probability thresholds are optimized by searching the range 0.05-0.95 in steps of 0.01, maximizing Macro-F1.
+2. Aggregation Strategy Selection — the best patient-level aggregation strategy is selected based on Macro-F1 and balanced accuracy. The following strategies were implemented and evaluated:
+```python
+THRESHOLDS = np.arange(0.05, 0.95, 0.01)
+
+def aggregate_probs(probs, strategy):
+    """Aggregate row-level probs to patient level."""
+    if strategy == 'mean':
+        return np.mean(probs)
+    elif strategy == 'max':
+        return np.max(probs)
+    elif strategy == 'majority_vote':
+        preds = (probs >= 0.5).astype(int)
+        return 1 if np.sum(preds) > len(preds) / 2 else 0
+    elif strategy == 'top3_mean':
+        top3 = np.sort(probs)[-3:]
+        return np.mean(top3)
+    elif strategy == 'p90':
+        return np.percentile(probs, 90)
+    elif strategy == 'confidence_weighted':
+        weights = np.abs(probs - 0.5)
+        return np.average(probs, weights=weights)
+    elif strategy == 'entropy_weighted':
+        entropy = -(probs * np.log(probs + 1e-10) + (1 - probs) * np.log(1 - probs + 1e-10))
+        weights = 1 / (entropy + 1e-10)
+        return np.average(probs, weights=weights)
+
+AGGREGATION_STRATEGIES = [
+    'mean', 'max', 'majority_vote', 'top3_mean',
+    'p90', 'confidence_weighted', 'entropy_weighted'
+]
+```
+
+After threshold and aggregation strategy selection, the training and validation sets are merged and the final model is retrained using the best hyperparameters found during optimization. Sigmoid calibration is then applied before test set evaluation.
+
+
 
 
 
