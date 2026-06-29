@@ -4,7 +4,7 @@ Papilledema classification using radiomic features and a machine learning pipeli
 >  This is an educational project developed during my university studies,
 > reflecting my hands-on experience.
 
-Note: This repo is currently in the editing phase.
+Note: This repository is currently in the editing phase.
 
 ## Introduction
 
