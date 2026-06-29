@@ -181,6 +181,73 @@ AGGREGATION_STRATEGIES = [
 
 After threshold and aggregation strategy selection, the training and validation sets are merged and the final model is retrained using the best hyperparameters found during optimization. Sigmoid calibration is then applied before test set evaluation.
 
+## Preprocessing
+
+To prevent data leakage and ensure a realistic evaluation of my ML models, it is critical that all preprocessing steps are fitted exclusively on the training portion of the data and then applied to the validation and test sets.
+
+The preprocessing function:
+
+```python
+def preprocess(X_train, X_val, X_test, cols):
+    # Median imputation
+    imputer = SimpleImputer(strategy='median')
+    X_train = pd.DataFrame(imputer.fit_transform(X_train), columns=cols)
+    X_val   = pd.DataFrame(imputer.transform(X_val), columns=cols)
+    X_test  = pd.DataFrame(imputer.transform(X_test), columns=cols)
+
+    # Low-variance filtering
+    var = VarianceThreshold(threshold=0.01)
+    var.fit(X_train)
+    cols = [c for c, k in zip(cols, var.get_support()) if k]
+    X_train = X_train[cols]
+    X_val   = X_val[cols]
+    X_test  = X_test[cols]
+
+    # High-correlation filtering
+    corr = X_train.corr().abs()
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+    to_drop = [c for c in upper.columns if any(upper[c] > 0.95)]
+    cols = [c for c in cols if c not in to_drop]
+    X_train = X_train[cols]
+    X_val   = X_val[cols]
+    X_test  = X_test[cols]
+
+    # RobustScaler
+    scaler = RobustScaler()
+    X_train = pd.DataFrame(scaler.fit_transform(X_train), columns=cols)
+    X_val   = pd.DataFrame(scaler.transform(X_val), columns=cols)
+    X_test  = pd.DataFrame(scaler.transform(X_test), columns=cols)
+
+    return X_train, X_val, X_test, cols
+```
+
+Prior to imputation, all infinite values in the feature matrix were replaced with `NaN`. A total of 1 infinite value was detected across the dataset.
+
+```python
+feature_cols = [col for col in df.columns if col.startswith('Feature_')]
+df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+```
+
+A complete preprocessing summary is shown below:
+
+| Step | Method | Result |
+|------|--------|--------|
+| Infinite value handling | Replace with NaN | 1 value fixed |
+| Missing value imputation | Median imputation (train only) | 0 remaining NaN |
+| Low-variance filtering | VarianceThreshold (threshold=0.01) | 746 → ~419 features |
+| High-correlation filtering | Pearson correlation > 0.95 | ~419 → ~147 features |
+| Feature scaling | RobustScaler (train only) | Median ≈ 0.0 |
+
+## Feature Selection
+
+Minimum Redundancy Maximum Relevance (MRMR) is a supervised, filter-based feature selection algorithm designed to find the most useful features for a target variable while reducing feature overlap.
+
+The core objective of MRMR is to balance two competing criteria when selecting features:
+* Maximum Relevance that selects features with high mutual information with the target class
+* Minimum Redundancy that ensures selected features share low mutual information with each other
+
+
+
 
 
 
