@@ -246,13 +246,145 @@ The core objective of MRMR is to balance two competing criteria when selecting f
 * Maximum Relevance that selects features with high mutual information with the target class
 * Minimum Redundancy that ensures selected features share low mutual information with each other
 
+> In MRMR feature selection framework, **Mutual Information** serves as the core mathematical metric used to evaluate and > select the most informative, non-redundant subset of features for a ML model.
 
+Before diving into the full pipeline, here is a straightforward demonstration of what MRMR does on my dataset. When asked to select the top 10 features, it does not simply pick the 10 most correlated with the label, it simultaneously evaluates feature-to-class relevance and feature-to-feature interdependence:
+```python
+from mrmr import mrmr_classif
 
+X = df[feature_cols]
+y = df['label']
 
+selected_features = mrmr_classif(
+    X=X,
+    y=y,
+    K=10,  # amount of feautes
+    show_progress=True  
+)
 
+print("Selected features:")
+for i, feat in enumerate(selected_features, 1):
+    print(f"  {i}. {feat}")
+```
 
+MRMR does not simply pick the 10 most relevant features. It evaluates both feature-to-class relevance and feature-to-feature interdependence simultaneously. The output is shown below:
+```text
+Selected features:
+  1. Feature_0224
+  2. Feature_0341
+  3. Feature_0409
+  4. Feature_0316
+  5. Feature_0408
+  6. Feature_0041
+  7. Feature_0479
+  8. Feature_0454
+  9. Feature_0500
+  10. Feature_0478
+```
 
+In the actual pipeline, MRMR is applied strictly within each inner cross-validation fold — fitted only on `X_inner_train` and never exposed to validation or test data. The number of features to select (`n_mrmr_features`) is treated as a hyperparameter and jointly optimized by Optuna in the range `5–30`:
 
+```python
+def optuna_objective(trial, model_name, X_train_outer, y_train_outer, groups_outer):
+
+    model  = get_model(trial, model_name)
+    n_mrmr = trial.suggest_int('n_mrmr_features', 5, 30)
+
+    inner_cv    = StratifiedGroupKFold(n_splits=N_INNER_FOLDS, shuffle=True, random_state=123)
+    fold_scores = []
+    cols        = list(X_train_outer.columns)
+
+    for inner_train_idx, inner_val_idx in inner_cv.split(X_train_outer, y_train_outer, groups=groups_outer):
+
+        X_inner_train = X_train_outer.iloc[inner_train_idx].reset_index(drop=True)
+        X_inner_val   = X_train_outer.iloc[inner_val_idx].reset_index(drop=True)
+        y_inner_train = y_train_outer.iloc[inner_train_idx].reset_index(drop=True)
+        y_inner_val   = y_train_outer.iloc[inner_val_idx].reset_index(drop=True)
+
+        # Preprocessing fit on inner-train only
+        X_inner_train, X_inner_val, _, inner_cols = preprocess(
+            X_inner_train, X_inner_val, X_inner_val.copy(), cols
+        )
+
+        # MRMR on inner-train only
+        selected = mrmr_classif(
+            X=X_inner_train, y=y_inner_train,
+            K=n_mrmr, show_progress=False
+        )
+
+        X_inner_train = X_inner_train[selected]
+        X_inner_val   = X_inner_val[selected]
+
+        # Train & evaluate
+        model.fit(X_inner_train, y_inner_train)
+        preds = model.predict(X_inner_val)
+        score = f1_score(y_inner_val, preds, average='macro')
+        fold_scores.append(score)
+
+    return np.mean(fold_scores)
+```
+
+Applying MRMR strictly within each training fold eliminates selection bias and prevents data leakage — the feature selector never sees validation or test labels at any point.
+
+### Feature Stability Analysis
+
+When feature selection is applied across multiple data splits, the specific features chosen can vary due to differences in training samples. Feature stability measures how consistently a feature is selected across these different subsets — a stable feature is one that appears repeatedly regardless of which patients end up in the training set.
+
+MRMR was run across 20 outer splits × 6 models = 120 independent feature selection runs. Features were then ranked by their selection frequency and categorized using thresholds of 50%, 60%, 70%, and 80%:
+* Lower thresholds (50%) — capture moderately stable features that may still contain valuable predictive signals
+* Higher thresholds (80%) — retain only the most robust features that consistently generalize across different data configurations and model types
+```python
+from collections import Counter
+
+# Count selection frequency across all splits and models
+all_feature_counts = Counter()
+total_selections = N_OUTER_SPLITS * len(MODEL_NAMES)
+
+for model_name in MODEL_NAMES:
+    for outer_idx in range(N_OUTER_SPLITS):
+        key = f"split{outer_idx}_{model_name}"
+        all_feature_counts.update(test_results[key]['selected_features'])
+
+all_feature_freq = {
+    feat: count / total_selections
+    for feat, count in all_feature_counts.items()
+}
+
+# Apply stability thresholds
+STABILITY_THRESHOLDS = [0.50, 0.60, 0.70, 0.80]
+
+for thresh in STABILITY_THRESHOLDS:
+    stable = [f for f, freq in all_feature_freq.items() if freq >= thresh]
+    print(f"  Threshold {int(thresh*100)}%: {len(stable)} features")
+
+# Top 10 most stable features
+top10 = sorted(all_feature_freq.items(), key=lambda x: x[1], reverse=True)[:10]
+for feat, freq in top10:
+    print(f"  {feat}: {freq*100:.1f}%")
+```
+
+Running the code above produces:
+
+```text
+Threshold 50%: 21 features
+Threshold 60%: 19 features
+Threshold 70%: 18 features
+Threshold 80%: 16 features
+
+Top 10 most stable features (across all models + splits):
+  Feature_0479: 100.0%
+  Feature_0478: 100.0%
+  Feature_0061: 100.0%
+  Feature_0072: 100.0%
+  Feature_0003:  98.3%
+  Feature_0442:  97.5%
+  Feature_0067:  96.7%
+  Feature_0028:  95.8%
+  Feature_0647:  92.5%
+  Feature_0010:  89.2%
+```
+
+## Modeling
 
 
 
